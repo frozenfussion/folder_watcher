@@ -1,0 +1,1 @@
+Hello team. This week we finished the first part of the folder watcher. The model server runs on the local GPU and no data leaves the machine. Thank you for your support.

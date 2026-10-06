@@ -2,7 +2,7 @@
 
 Drop a document into a folder. A small AI agent, running **entirely on your own machine** with an open-weight model, notices it, decides what to do, and (if the document is not in English) writes an English translation to another folder. No cloud, no API keys, no data leaving your computer.
 
-> **Status: planning stage.** This README describes the design and how to set up your machine. The "Using it" section describes the *planned* behaviour and will be updated after the build is finished. The full design is in [`SPEC.md`](SPEC.md).
+> **Status: Milestones 1 to 3 of 7 are built** (Python package and config, system prerequisites, local model server). You can test the model server today: see [Testing it](#testing-it). The watcher, the agent and the services are **not built yet**, so the "Using it" section still describes *planned* behaviour. The full design is in [`SPEC.md`](SPEC.md).
 
 ---
 
@@ -92,7 +92,7 @@ Neither starts at boot or login. You start them when you want them.
 
 - Windows 10 or 11 with **WSL2** and an **Ubuntu** distribution
 - (Optional, recommended) an NVIDIA GPU with the **NVIDIA driver installed on Windows**. Without a GPU it still works on CPU, only slower.
-- About **10 GB of free disk space** for the model, tools, and build. (Rough estimate. The 9B model file alone is about 5.7 GB.)
+- About **6 GB of free disk space** for the project (measured: model 5.3 GiB, llama.cpp build about 0.5 GB, Python environment about 0.1 GB), **plus about 5 GB** for the CUDA toolkit if you have an NVIDIA GPU.
 - A **Claude** account that includes Claude Code (Pro, Max, Team, Enterprise, or Console), because Claude Code does the building
 - A GitHub account
 
@@ -306,9 +306,305 @@ What to expect while it builds:
 
 ---
 
+## Testing it
+
+These tests cover what is built **today** (Milestones 1 to 3): the Python package, the config file, the llama.cpp build, the downloaded model, and the local model server. Every command below was run on the reference machine (RTX 3070 Ti Laptop GPU, 8 GB) exactly as written.
+
+The model is a language model, so its wording changes from run to run. The steps below tell you what to **check**. Real output is shown only as an *example*.
+
+### Part A: checks that do not need the model server
+
+**A1. Go to the project folder.**
+
+```bash
+cd ~/projects/folder_watcher
+```
+
+**A2. Run the unit tests.** They test the config loader and the model-server command line, and need no model.
+
+```bash
+.venv/bin/pytest -q
+```
+
+What you should see: a final line like `12 passed`, and no `failed`.
+
+**A3. Check which backend llama.cpp was built for.**
+
+```bash
+cat vendor/BACKEND
+```
+
+What you should see: `cuda` on a machine with an NVIDIA GPU, `cpu` otherwise.
+
+**A4. Check the model file is there and complete.**
+
+```bash
+ls -l models/
+```
+
+What you should see: `Qwen3.5-9B-Q4_K_M.gguf` with a size of exactly `5680522464` bytes.
+
+**A5. Read a value from the config file.**
+
+```bash
+.venv/bin/python -m folder_watcher config get watch.enabled
+```
+
+What you should see: `True`.
+
+**A6. (GPU only) Note how much GPU memory is in use before the model loads.**
+
+```bash
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+```
+
+What you should see: a small "used" number. Write it down; you compare against it later. Example:
+
+```text
+memory.used [MiB], memory.total [MiB]
+791 MiB, 8192 MiB
+```
+
+### Part B: the local model server
+
+You need **two terminal tabs**. Terminal 1 runs the model server. Terminal 2 sends it requests.
+
+**B1. Terminal 1: go to the project folder.**
+
+```bash
+cd ~/projects/folder_watcher
+```
+
+**B2. Terminal 1: start the model server.** It reads `config/config.toml`, builds the `llama-server` command, and runs it in this terminal.
+
+```bash
+.venv/bin/python -m folder_watcher llm-server
+```
+
+What you should see: the first line starts with `backend=cuda exec:` (or `backend=cpu`) followed by the full command. Look for `--host 127.0.0.1`: the server is only reachable from this machine. After a few seconds the last lines include `model loaded` and `listening on http://127.0.0.1:8080`. **Leave it running.**
+
+**B3. Terminal 2: go to the project folder.**
+
+```bash
+cd ~/projects/folder_watcher
+```
+
+**B4. Terminal 2: ask the server if it is ready.**
+
+```bash
+curl -s http://127.0.0.1:8080/health
+```
+
+What you should see: `{"status":"ok"}`. If you see `"Loading model"` with code `503` instead, the model is still loading: wait a few seconds and run it again.
+
+**B5. (GPU only) Check the model is in GPU memory.**
+
+```bash
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+```
+
+What you should see: "used" is about **5.5 GB higher** than the number you wrote down in A6. Example: `6251 MiB, 8192 MiB`.
+
+**B6. Ask the model a question.**
+
+```bash
+curl -s http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d '{"messages":[{"role":"user","content":"In one sentence, what is the capital of Malaysia?"}],"max_tokens":100}' | python3 -c 'import sys,json; m=json.load(sys.stdin)["choices"][0]["message"]; print("Answer:", m["content"]); print("Thinking text present:", "<think>" in m["content"] or bool(m.get("reasoning_content")))'
+```
+
+What you should check: the answer mentions **Kuala Lumpur**, and `Thinking text present: False`. (Qwen3.5 "thinks" out loud by default; the server is started with thinking turned off, because it wastes time on translation.) Example:
+
+```text
+Answer: The capital of Malaysia is Kuala Lumpur.
+Thinking text present: False
+```
+
+**B7. Check the model can call a tool.** The agent (Milestone 4) depends on this. The request offers the model one made-up tool, `get_weather`.
+
+```bash
+curl -s http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d '{"messages":[{"role":"user","content":"What is the weather in Penang?"}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city.","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"max_tokens":200}' | python3 -c 'import sys,json; c=json.load(sys.stdin)["choices"][0]; print("finish_reason:", c["finish_reason"]); [print("tool call:", t["function"]["name"], t["function"]["arguments"]) for t in c["message"].get("tool_calls") or []]'
+```
+
+What you should check: `finish_reason: tool_calls`, and a tool call to `get_weather` with the city `Penang`. Example:
+
+```text
+finish_reason: tool_calls
+tool call: get_weather {"city":"Penang"}
+```
+
+**B8. Translate the Malay sample document.** The file `tests/samples/laporan_mingguan.md` is a short weekly report in Malay with headings, lists, a code block and a link. The translation tool and agent do not exist yet, so this step sends the file straight to the model server, using the translation settings from `config/config.toml`. The result goes to `state/` (a scratch folder that git ignores), **not** to `destination/`.
+
+```bash
+.venv/bin/python - <<'EOF'
+from pathlib import Path
+from openai import OpenAI
+from folder_watcher.config import load_config
+
+cfg = load_config()
+s = cfg.llm.sampling_translate
+client = OpenAI(base_url=cfg.llm.base_url + "/v1", api_key="not-needed")
+text = Path("tests/samples/laporan_mingguan.md").read_text()
+reply = client.chat.completions.create(
+    model=cfg.llm.alias,
+    messages=[
+        {"role": "system", "content": "Translate the user's text to English. Output only the translation. "
+         "Keep the Markdown structure exactly. Do not translate code blocks, inline code or URLs. "
+         "Keep proper nouns as they are."},
+        {"role": "user", "content": text},
+    ],
+    temperature=s.temperature, top_p=s.top_p, presence_penalty=s.presence_penalty,
+    extra_body={"top_k": s.top_k, "min_p": s.min_p},
+)
+out = Path("state/laporan_mingguan.en.md")
+out.write_text(reply.choices[0].message.content + "\n")
+print(f"Wrote {out}")
+EOF
+```
+
+What you should see: `Wrote state/laporan_mingguan.en.md` after a few seconds.
+
+**B9. Read the translation.**
+
+```bash
+cat state/laporan_mingguan.en.md
+```
+
+What you should check: it is in English, with the same headings, lists and code block as the original. Example (beginning only):
+
+```text
+# Weekly Project Report
+
+To all team members,
+
+This week we have completed the first part of the folder monitoring system. ...
+```
+
+**B10. Check the Markdown structure survived.** This compares the headings, list markers and code fences of the original and the translation, line by line.
+
+```bash
+diff <(grep -oE '^(#+|-|[0-9]+\.|```)' tests/samples/laporan_mingguan.md) <(grep -oE '^(#+|-|[0-9]+\.|```)' state/laporan_mingguan.en.md) && echo "Structure matches"
+```
+
+What you should see: `Structure matches`. Anything else (lines starting with `<` or `>`) means the structure changed.
+
+**B11. Check the command inside the code block is unchanged.**
+
+```bash
+grep -F 'ls -la source/' state/laporan_mingguan.en.md
+```
+
+What you should see: `ls -la source/`. No output means the command was changed.
+
+**B12. Check the link is unchanged.**
+
+```bash
+grep -oF 'https://example.com/projek' state/laporan_mingguan.en.md
+```
+
+What you should see: `https://example.com/projek`.
+
+**B13. Check there is no "thinking" text in the output.**
+
+```bash
+grep -c '<think>' state/laporan_mingguan.en.md
+```
+
+What you should see: `0`.
+
+**B14. Known limitation: the comment inside the code block.**
+
+```bash
+grep -F '# Papar senarai fail dalam folder sumber' state/laporan_mingguan.en.md || echo "Comment was translated (known limitation until Milestone 4)"
+```
+
+What you will most likely see today: `Comment was translated (known limitation until Milestone 4)`. The model tends to translate the comment inside the code block even when told not to. A prompt is not a guarantee, so Milestone 4 will protect code blocks **in code**: they will be taken out before translation and put back afterwards. After Milestone 4, this check should print the original Malay comment.
+
+**B15. Check the model can tell English from non-English.** The agent's first decision (Milestone 4) is whether a file is already English, in which case it is skipped, not translated. This step asks the model that question about both sample files: `tests/samples/english_note.txt` (a short English note) and the Malay report. It uses the agent settings from `config/config.toml`.
+
+```bash
+.venv/bin/python - <<'EOF'
+from pathlib import Path
+from openai import OpenAI
+from folder_watcher.config import load_config
+
+cfg = load_config()
+s = cfg.llm.sampling_agent
+client = OpenAI(base_url=cfg.llm.base_url + "/v1", api_key="not-needed")
+for name in ["tests/samples/english_note.txt", "tests/samples/laporan_mingguan.md"]:
+    reply = client.chat.completions.create(
+        model=cfg.llm.alias,
+        messages=[
+            {"role": "system", "content": "Is most of the user's text written in English? "
+             "Answer with exactly one word: yes or no."},
+            {"role": "user", "content": Path(name).read_text()},
+        ],
+        temperature=s.temperature, top_p=s.top_p, presence_penalty=s.presence_penalty,
+        extra_body={"top_k": s.top_k, "min_p": s.min_p}, max_tokens=5,
+    )
+    print(f"{name}: English? {reply.choices[0].message.content.strip()}")
+EOF
+```
+
+What you should check: **yes** for `english_note.txt` and **no** for `laporan_mingguan.md`. (It gave the same answers in 5 out of 5 runs on the reference machine.) Example:
+
+```text
+tests/samples/english_note.txt: English? yes
+tests/samples/laporan_mingguan.md: English? no
+```
+
+This only shows the model *can* make the decision. Actually skipping the English file, with the reason in the log, arrives with the agent in Milestone 4.
+
+**B16. Terminal 1: stop the model server.** Press **Ctrl+C** in Terminal 1.
+
+What you should see: a line ending in `cleaning up before exit...`, then your normal prompt.
+
+**B17. Terminal 2: check the server is gone.**
+
+```bash
+curl -s http://127.0.0.1:8080/health
+```
+
+What you should see: nothing at all. `curl` cannot connect any more.
+
+**B18. (GPU only) Check the GPU memory was freed.**
+
+```bash
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+```
+
+What you should see: about the same "used" number as in A6. Example: `786 MiB, 8192 MiB`.
+
+### Optional: see the GPU offload in the server log
+
+The normal server log does not list where each layer went. To see it, start the server in Terminal 1 with more detailed logging, filtered down to the two lines that matter:
+
+```bash
+LLAMA_ARG_LOG_VERBOSITY=4 .venv/bin/python -m folder_watcher llm-server 2>&1 | grep --line-buffered -E "offloaded|listening"
+```
+
+What you should see (on a GPU machine):
+
+```text
+0.01.344.840 I load_tensors: offloaded 33/33 layers to GPU
+0.02.285.892 I srv  llama_server: listening on http://127.0.0.1:8080
+```
+
+`33/33` means the whole model is on the GPU. Press **Ctrl+C** to stop it.
+
+### Not testable yet
+
+| Feature | Available after |
+|---|---|
+| Agent deciding between translate and skip, with tools | Milestone 4 |
+| Watching `source/`, writing to `destination/`, live on/off toggle | Milestone 5 |
+| `scripts/start.sh`, `stop.sh`, `status.sh`, `logs.sh` and the systemd services | Milestone 6 |
+| `python -m folder_watcher check` (currently prints "not built yet") | Milestone 6 |
+| CPU-only mode (`gpu_layers = "0"`) and the full acceptance checklist | Milestone 7 |
+
+---
+
 ## Using it (planned)
 
-> These commands are the **plan** from `SPEC.md`. They will be confirmed and corrected once the build is finished.
+> **Not available yet.** The watcher arrives in Milestone 5 and the `scripts/start.sh`, `logs.sh`, `status.sh` and `stop.sh` services in Milestone 6. These commands are the **plan** from `SPEC.md` and will be confirmed and corrected once they are built. What you can test today is in [Testing it](#testing-it).
 
 Start the services (this also loads the model, which can take a minute):
 
@@ -380,7 +676,7 @@ alias = "qwen3.5-4b"
 
 Smaller models translate less accurately and follow tool instructions less reliably, so expect to test the results.
 
-**No GPU at all?** Everything still runs on the CPU. The setup detects this, and `gpu_layers = "0"` in `[llm]` forces CPU use even when a GPU is present. A smaller model is the better choice on CPU.
+**No GPU at all?** Everything is designed to run on the CPU too: `scripts/build_llama.sh` detects a missing GPU and builds for CPU, and `gpu_layers = "0"` in `[llm]` is meant to force CPU use even when a GPU is present. *CPU mode has not been tested yet; that is part of the final acceptance checks.* A smaller model is the better choice on CPU.
 
 ---
 
@@ -402,7 +698,7 @@ The agent loop does not change. The agent is only shown the tools that fit the f
 |---|---|
 | [`SPEC.md`](SPEC.md) | The complete design and acceptance checklist |
 | [`CLAUDE.md`](CLAUDE.md) | Working rules for Claude Code |
-| `config/config.toml` | The one config file (created by the build) |
+| `config/config.toml` | The one config file |
 | `source/` | Watched folder: drop files here |
 | `destination/` | Translated files appear here |
 
@@ -417,4 +713,4 @@ The agent loop does not change. The agent is only shown the tools that fit the f
 | `git pull` or `git push` asks for a password | Run `gh auth setup-git`, then try again. |
 | `E: Unable to locate package` | Run `sudo apt update` first. |
 
-*This README will be revised after the build to reflect what was actually created.*
+*This README is updated as each milestone is finished. It currently reflects Milestones 1 to 3.*
