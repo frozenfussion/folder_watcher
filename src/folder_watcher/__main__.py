@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
+from pathlib import Path
 from dataclasses import fields, is_dataclass
 
 from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config
+from .guards import GuardError, resolve_job_file
 
 
 def _lookup(cfg: object, dotted: str) -> object:
@@ -37,6 +40,48 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 2
 
 
+def setup_logging(level: str) -> None:
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S",
+                        stream=sys.stdout)
+    # The HTTP libraries log every request at INFO; that drowns the agent trace.
+    for noisy in ("httpx", "httpx2", "httpcore", "openai"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Run the agent on one file by hand, without the watcher."""
+    from .agent import run_job
+    from .llm_client import LLMClient
+    from .tools import Registry
+
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 1
+    setup_logging(cfg.logging.level)
+    path = Path(args.file)
+    try:
+        resolve_job_file(cfg.watch.source_dir, path)
+    except GuardError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        if not path.is_symlink():
+            print(f"The agent only reads files in source/. Copy it there first, for example:  "
+                  f"cp {args.file} source/", file=sys.stderr)
+        return 1
+    registry = Registry.discover()
+    for ext in registry.unsupported(cfg.watch.extensions):
+        logging.error("watch.extensions lists %s but no reader tool supports it", ext)
+    llm = LLMClient(cfg.llm, timeout=cfg.agent.job_timeout_seconds)
+    if not llm.wait_until_ready(60, on_wait=lambda: logging.info("waiting for the model server at %s ...",
+                                                                  cfg.llm.base_url)):
+        print(f"The model server at {cfg.llm.base_url} is not answering.\n"
+              "Start it in another terminal with:  .venv/bin/python -m folder_watcher llm-server", file=sys.stderr)
+        return 1
+    result = run_job(path, cfg, registry, llm, max_steps=args.max_steps)
+    return 1 if result.status == "failed" else 0
+
+
 def cmd_llm_server(args: argparse.Namespace) -> int:
     from .launch_llm import main as launch
 
@@ -58,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("watch", help="run the watcher").set_defaults(func=not_yet("Milestone 5"))
     sub.add_parser("llm-server", help="start llama-server from config").set_defaults(func=cmd_llm_server)
     sub.add_parser("check", help="preflight checks").set_defaults(func=not_yet("Milestone 6"))
+
+    p = sub.add_parser("run", help="run the agent on one file in source/ (no watcher)")
+    p.add_argument("file", help="path of a file inside source/")
+    p.add_argument("--max-steps", type=int, default=None, help="override agent.max_steps for this run")
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("config", help="read or change a config value")
     p.add_argument("action", choices=["get", "set"])

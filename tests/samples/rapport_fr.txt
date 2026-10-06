@@ -1,0 +1,15 @@
+Compte rendu de la réunion du lundi
+
+Bonjour à toutes et à tous,
+
+La réunion de lundi a permis de faire le point sur le projet. Le serveur de traduction fonctionne maintenant sur la carte graphique du laboratoire. Les premiers essais sont encourageants : les documents courts sont traduits en quelques secondes.
+
+Prochaines étapes :
+- tester des documents plus longs ;
+- vérifier que les blocs de code ne sont jamais modifiés ;
+- préparer une démonstration pour les étudiants.
+
+La prochaine réunion aura lieu jeudi à quatorze heures, dans la salle 204.
+
+Cordialement,
+Claire Dubois
