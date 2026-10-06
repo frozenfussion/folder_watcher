@@ -2,7 +2,7 @@
 
 Drop a document into a folder. A small AI agent, running **entirely on your own machine** with an open-weight model, notices it, decides what to do, and (if the document is not in English) writes an English translation to another folder. No cloud, no API keys, no data leaving your computer.
 
-> **Status: Milestones 1 to 5 of 7 are built** (Python package and config, system prerequisites, local model server, the agent and its tools, the folder watcher). You can run the watcher in a terminal today, with the live on/off toggle: see [Testing it](#testing-it). The systemd services and the `start.sh`/`stop.sh` scripts are **not built yet**, so the "Using it" section still describes *planned* behaviour. The full design is in [`SPEC.md`](SPEC.md).
+> **Status: Milestones 1 to 6 of 7 are built** (Python package and config, system prerequisites, local model server, the agent and its tools, the folder watcher, and the services with `start.sh`, `stop.sh`, `status.sh`, `logs.sh` and `check`). See [Using it](#using-it). The last milestone (the full acceptance checklist, including CPU-only mode) is **not done yet**, so the "Using it" section still describes *planned* behaviour. The full design is in [`SPEC.md`](SPEC.md).
 
 ---
 
@@ -308,7 +308,7 @@ What to expect while it builds:
 
 ## Testing it
 
-These tests cover what is built **today** (Milestones 1 to 5): the Python package, the config file, the llama.cpp build, the downloaded model, the local model server, the agent with its tools, and the folder watcher running in a terminal. Every command below was run on the reference machine (RTX 3070 Ti Laptop GPU, 8 GB) exactly as written.
+These tests look inside each part by hand: the Python package, the config file, the llama.cpp build, the downloaded model, the local model server, the agent with its tools, and the folder watcher running in a terminal. For everyday use with the services, see [Using it](#using-it). Every command below was run on the reference machine (RTX 3070 Ti Laptop GPU, 8 GB) exactly as written.
 
 The model is a language model, so its wording changes from run to run. The steps below tell you what to **check**. Real output is shown only as an *example*.
 
@@ -368,6 +368,14 @@ memory.used [MiB], memory.total [MiB]
 ### Part B: the local model server
 
 You need **two terminal tabs**. Terminal 1 runs the model server. Terminal 2 sends it requests.
+
+**B0. Make sure the services are not running**, because they would hold port 8080 (this is harmless if they are already stopped):
+
+```bash
+scripts/stop.sh
+```
+
+What you should see: `Both services are inactive.`
 
 **B1. Terminal 1: go to the project folder.**
 
@@ -781,54 +789,141 @@ What you should see (on a GPU machine):
 
 | Feature | Available after |
 |---|---|
-| `scripts/start.sh`, `stop.sh`, `status.sh`, `logs.sh` and the systemd services | Milestone 6 |
-| `python -m folder_watcher check` (currently prints "not built yet") | Milestone 6 |
 | CPU-only mode (`gpu_layers = "0"`) and the full acceptance checklist | Milestone 7 |
 
 ---
 
-## Using it (planned)
+## Using it
 
-> **Not available yet as services.** The watcher itself works today in a terminal (see [Testing it](#testing-it), Part E), and `config set watch.enabled false` works as shown below. The `scripts/start.sh`, `logs.sh`, `status.sh` and `stop.sh` services arrive in Milestone 6. These commands are the **plan** from `SPEC.md` and will be confirmed and corrected once they are built. What you can test today is in [Testing it](#testing-it).
+Day to day, the model server and the watcher run as two **systemd user services**. They **never start by themselves** (not at boot, not at login): you start them with `scripts/start.sh` and stop them with `scripts/stop.sh`. Every command below was run on the reference machine exactly as written.
 
-Start the services (this also loads the model, which can take a minute):
+### Once: install the services
+
+```bash
+cd ~/projects/folder_watcher
+```
+
+```bash
+scripts/install_services.sh
+```
+
+What you should see: `wrote .../folder-watcher-llm.service` and `wrote .../folder-watcher.service` the first time (`unchanged` on later runs), then `is-enabled: static` for both. **`static` means the service has no `[Install]` section, so it cannot be enabled to start automatically.** That is on purpose.
+
+### Start
 
 ```bash
 scripts/start.sh
 ```
 
-Watch what the agent is doing:
+What you should see: `Starting the model server, then the watcher ...` and, when everything is up, `READY after 4.3s: you can drop files into .../source/ now.` The command only returns once the watcher is really watching. **Wait for `READY` before dropping files**: files that are already in `source/` when the watcher starts are ignored on purpose. Right after a reboot the first start is slower, because the 5.7 GB model is read from disk.
+
+### Watch the agent work
+
+Open a **second terminal tab** for the log:
+
+```bash
+cd ~/projects/folder_watcher
+```
 
 ```bash
 scripts/logs.sh
 ```
 
-Drop a file in `source/` (from another terminal tab):
+What you should see: the watcher's lines (`watching ... for new .txt, .md files`) and the important model-server lines, including `offloaded 33/33 layers to GPU` on a GPU machine. It keeps following the log; **Ctrl+C** stops following, not the services. `scripts/logs.sh all` shows everything the model server prints (much more).
+
+### Drop a file
+
+Back in the **first tab**:
 
 ```bash
-cp my_french_note.txt source/
+cp tests/samples/laporan_mingguan.md source/
 ```
 
-After a short wait, `destination/my_french_note.en.txt` appears. The log shows every step the agent took, including *why* it skipped or translated.
+What you should see **in the log tab**: `new file laporan_mingguan.md`, `queued`, the agent's tool calls, and `DONE in ...s: wrote destination/laporan_mingguan.en.md`, about 10 seconds after the drop.
 
-Switch watching off and on without restarting (`config/config.toml`, section `[watch]`):
-
-```toml
-[watch]
-enabled = false      # change to true to resume
-extensions = [".txt", ".md"]
+```bash
+ls destination/
 ```
 
-> Files that arrive while watching is **off** are ignored for good. They are not processed when you switch it back on.
+What you should see: `laporan_mingguan.en.md`. Your own `.txt` and `.md` files work the same way: copy them into `source/`.
 
-Check status, and stop when you are finished (this also frees the GPU memory):
+> Copying a file over one **with the same name** that is already in `source/` is an *edit*, not a new arrival, so it is not processed. Delete the old copy first (`rm source/<name>`) or give the file a new name.
+
+### Switch watching off and on (no restart)
+
+```bash
+.venv/bin/python -m folder_watcher config set watch.enabled false
+```
+
+What you should see: `watch.enabled: True -> False`, and **in the log tab** `watching disabled` within a second. Files that arrive while watching is off are **ignored for good**: they are not processed when you switch it back on.
+
+```bash
+.venv/bin/python -m folder_watcher config set watch.enabled true
+```
+
+What you should see: `watch.enabled: False -> True`, and **in the log tab** `watching enabled`.
+
+### Status
 
 ```bash
 scripts/status.sh
+```
+
+What you should see: both services `active (static)` with their start time, `llama.cpp backend: cuda`, `Model server (port 8080): {"status":"ok"}`, the GPU memory in use, the live config (`watch.enabled = True`), and a preflight check ending in `All checks passed.`
+
+### Stop
+
+```bash
 scripts/stop.sh
 ```
 
-The services never start on their own. After you close WSL or reboot, run `scripts/start.sh` again.
+What you should see: both services `inactive`, the GPU memory before and after (for example `6387 MiB before, 922 MiB now (freed 5465 MiB)`), and `Stopped in 0.3s. Both services are inactive.`
+
+If you stop the services while a file is being translated, that file is not finished and nothing is written for it; the log says `not processed: <file> (copy it into source/ again to process it)`.
+
+### The restart test: nothing starts by itself
+
+This proves the services do not start on their own after WSL restarts. (Claude Code cannot do this step for you: shutting down WSL would end its own session.)
+
+**R1.** Make sure the services are stopped (they are, after `scripts/stop.sh` above). Then, in **Windows PowerShell** (not in Ubuntu):
+
+```powershell
+wsl.exe --shutdown
+```
+
+What you should see: nothing; the Ubuntu window(s) close or show that the process exited.
+
+**R2.** Open the **Ubuntu** app again, then:
+
+```bash
+cd ~/projects/folder_watcher
+```
+
+```bash
+scripts/status.sh
+```
+
+What you should see: both services `inactive (static)`, `Model server (port 8080): not answering`, and the GPU memory back at its idle level. They did **not** start by themselves.
+
+**R3.** Start them by hand and check they work again:
+
+```bash
+scripts/start.sh
+```
+
+What you should see: `READY after ...s`. This first start after a WSL restart reads the model from disk, so it may take longer than the usual few seconds. Then stop them again:
+
+```bash
+scripts/stop.sh
+```
+
+### Preflight check
+
+```bash
+.venv/bin/python -m folder_watcher check
+```
+
+It checks the config, the folders, the model file, the llama.cpp build, the GPU, systemd and the services, and prints a plain-language **fix** for every problem it finds. It exits with an error if anything is wrong.
 
 ---
 
@@ -886,8 +981,10 @@ The agent loop does not change. The agent is only shown the tools that fit the f
 | `config/config.toml` | The one config file |
 | `source/` | Watched folder: drop files here |
 | `destination/` | Translated files appear here |
+| `scripts/` | `start.sh`, `stop.sh`, `status.sh`, `logs.sh`, `install_services.sh`, and the setup scripts |
+| `state/` | The processed-file ledger (git-ignored) |
 
-## Troubleshooting (setup)
+## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -897,5 +994,14 @@ The agent loop does not change. The agent is only shown the tools that fit the f
 | `gh auth status` says you are not logged in | Run `gh auth login` again. |
 | `git pull` or `git push` asks for a password | Run `gh auth setup-git`, then try again. |
 | `E: Unable to locate package` | Run `sudo apt update` first. |
+| `Failed to connect to bus: No medium found` from `systemctl --user` or the scripts | Run `export XDG_RUNTIME_DIR=/run/user/$(id -u)` and add that line to `~/.bashrc`. `scripts/status.sh` and `check` detect this and print the same fix. |
+| `start.sh` says `the services did not start` and the log shows `model not found at .../models/...gguf` | Run `scripts/download_model.sh`, then `scripts/start.sh` again. (`start.sh` has already stopped both services again.) |
+| `Warning: The unit file ... changed on disk. Run 'systemctl --user daemon-reload'` | Run `scripts/install_services.sh` again; it rewrites the service files and reloads them. |
+| A file was dropped but never processed, and the log says `not processed: <file>` or `ABANDONED` | The services were stopped or restarted while that file was waiting or being translated. Copy it into `source/` again. |
+| The model server stopped on its own (crash or `systemctl --user kill`) | It restarts by itself within a few seconds, and the watcher restarts with it. Anything that was waiting at that moment must be copied into `source/` again (see the row above). |
+| After the model server stops, the watcher needs about 20 seconds to notice | Expected with WSL's `networkingMode=mirrored`: a connection to a stopped server hangs instead of being refused, so the watcher waits for a 5-second timeout (three tries). |
+| I copied a file into `source/` again and nothing happened | A file with that name was already there, so the copy was an edit, not a new arrival. Run `rm source/<name>` first, then copy it again. |
+| A file dropped right after `start.sh`, before `READY`, was ignored | Wait for the `READY` line. Files present when the watcher starts count as "already there" and are never processed. |
+| An NVIDIA Linux driver ended up installed inside WSL (for example via Ubuntu's `nvidia-cuda-toolkit`) | Run `sudo bash scripts/system/02_cuda_toolkit_wsl.sh`; it removes those packages and installs NVIDIA's WSL toolkit instead. |
 
-*This README is updated as each milestone is finished. It currently reflects Milestones 1 to 5.*
+*This README is updated as each milestone is finished. It currently reflects Milestones 1 to 6.*
