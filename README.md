@@ -2,7 +2,7 @@
 
 Drop a document into a folder. A small AI agent, running **entirely on your own machine** with an open-weight model, notices it, decides what to do, and (if the document is not in English) writes an English translation to another folder. No cloud, no API keys, no data leaving your computer.
 
-> **Status: Milestones 1 to 3 of 7 are built** (Python package and config, system prerequisites, local model server). You can test the model server today: see [Testing it](#testing-it). The watcher, the agent and the services are **not built yet**, so the "Using it" section still describes *planned* behaviour. The full design is in [`SPEC.md`](SPEC.md).
+> **Status: Milestones 1 to 4 of 7 are built** (Python package and config, system prerequisites, local model server, the agent and its tools). You can test the model server and run the agent on one file by hand today: see [Testing it](#testing-it). The watcher and the services are **not built yet**, so the "Using it" section still describes *planned* behaviour. The full design is in [`SPEC.md`](SPEC.md).
 
 ---
 
@@ -308,7 +308,7 @@ What to expect while it builds:
 
 ## Testing it
 
-These tests cover what is built **today** (Milestones 1 to 3): the Python package, the config file, the llama.cpp build, the downloaded model, and the local model server. Every command below was run on the reference machine (RTX 3070 Ti Laptop GPU, 8 GB) exactly as written.
+These tests cover what is built **today** (Milestones 1 to 4): the Python package, the config file, the llama.cpp build, the downloaded model, the local model server, and the agent with its tools, run by hand on one file at a time. Every command below was run on the reference machine (RTX 3070 Ti Laptop GPU, 8 GB) exactly as written.
 
 The model is a language model, so its wording changes from run to run. The steps below tell you what to **check**. Real output is shown only as an *example*.
 
@@ -320,13 +320,13 @@ The model is a language model, so its wording changes from run to run. The steps
 cd ~/projects/folder_watcher
 ```
 
-**A2. Run the unit tests.** They test the config loader and the model-server command line, and need no model.
+**A2. Run the unit tests.** They test the config loader, the model-server command line, the path guards, chunking, code protection, the tool registry, and the agent loop (with a fake model). They need no model server.
 
 ```bash
 .venv/bin/pytest -q
 ```
 
-What you should see: a final line like `12 passed`, and no `failed`.
+What you should see: a final line like `76 passed`, and no `failed`.
 
 **A3. Check which backend llama.cpp was built for.**
 
@@ -418,7 +418,7 @@ Answer: The capital of Malaysia is Kuala Lumpur.
 Thinking text present: False
 ```
 
-**B7. Check the model can call a tool.** The agent (Milestone 4) depends on this. The request offers the model one made-up tool, `get_weather`.
+**B7. Check the model can call a tool.** The agent depends on this. The request offers the model one made-up tool, `get_weather`.
 
 ```bash
 curl -s http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d '{"messages":[{"role":"user","content":"What is the weather in Penang?"}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city.","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"max_tokens":200}' | python3 -c 'import sys,json; c=json.load(sys.stdin)["choices"][0]; print("finish_reason:", c["finish_reason"]); [print("tool call:", t["function"]["name"], t["function"]["arguments"]) for t in c["message"].get("tool_calls") or []]'
@@ -431,133 +431,182 @@ finish_reason: tool_calls
 tool call: get_weather {"city":"Penang"}
 ```
 
-**B8. Translate the Malay sample document.** The file `tests/samples/laporan_mingguan.md` is a short weekly report in Malay with headings, lists, a code block and a link. The translation tool and agent do not exist yet, so this step sends the file straight to the model server, using the translation settings from `config/config.toml`. The result goes to `state/` (a scratch folder that git ignores), **not** to `destination/`.
+### Part C: the agent, on one file at a time
+
+The watcher is not built yet, so you hand the agent one file yourself with the `run` command. The agent only reads files inside `source/`, so each test first copies a sample file there. Keep the model server running in Terminal 1 and type these in **Terminal 2**.
+
+#### Test A: an English note is skipped
+
+**C1. Copy the English sample into `source/`.**
 
 ```bash
-.venv/bin/python - <<'EOF'
-from pathlib import Path
-from openai import OpenAI
-from folder_watcher.config import load_config
-
-cfg = load_config()
-s = cfg.llm.sampling_translate
-client = OpenAI(base_url=cfg.llm.base_url + "/v1", api_key="not-needed")
-text = Path("tests/samples/laporan_mingguan.md").read_text()
-reply = client.chat.completions.create(
-    model=cfg.llm.alias,
-    messages=[
-        {"role": "system", "content": "Translate the user's text to English. Output only the translation. "
-         "Keep the Markdown structure exactly. Do not translate code blocks, inline code or URLs. "
-         "Keep proper nouns as they are."},
-        {"role": "user", "content": text},
-    ],
-    temperature=s.temperature, top_p=s.top_p, presence_penalty=s.presence_penalty,
-    extra_body={"top_k": s.top_k, "min_p": s.min_p},
-)
-out = Path("state/laporan_mingguan.en.md")
-out.write_text(reply.choices[0].message.content + "\n")
-print(f"Wrote {out}")
-EOF
+cp tests/samples/english_note.txt source/
 ```
 
-What you should see: `Wrote state/laporan_mingguan.en.md` after a few seconds.
-
-**B9. Read the translation.**
+**C2. Run the agent on it.**
 
 ```bash
-cat state/laporan_mingguan.en.md
+.venv/bin/python -m folder_watcher run source/english_note.txt
 ```
 
-What you should check: it is in English, with the same headings, lists and code block as the original. Example (beginning only):
+What you should check: the agent calls `read_file`, then `skip_file` with a reason, and the last line starts with `SKIPPED` followed by that reason. The model chooses the reason, so its wording varies. The document text itself is not printed (it is only shown at DEBUG level). Example:
 
 ```text
-# Weekly Project Report
-
-To all team members,
-
-This week we have completed the first part of the folder monitoring system. ...
+11:44:02 INFO    [job 2ece] new file source/english_note.txt
+11:44:03 INFO    [job 2ece] step 1 -> tool read_file {"path":"source/english_note.txt"}
+11:44:03 INFO    [job 2ece] step 1 <- {"text_preview": "<171 chars, shown at DEBUG>", "total_chars": 171, "format": ".txt"}
+11:44:04 INFO    [job 2ece] step 2 -> tool skip_file {"reason":"Document is already in English"}
+11:44:04 INFO    [job 2ece] step 2 <- {"status": "skipped"}
+11:44:04 INFO    [job 2ece] SKIPPED in 2.4s: Document is already in English
 ```
 
-**B10. Check the Markdown structure survived.** This compares the headings, list markers and code fences of the original and the translation, line by line.
+**C3. Check nothing was written.**
 
 ```bash
-diff <(grep -oE '^(#+|-|[0-9]+\.|```)' tests/samples/laporan_mingguan.md) <(grep -oE '^(#+|-|[0-9]+\.|```)' state/laporan_mingguan.en.md) && echo "Structure matches"
+ls destination/
 ```
 
-What you should see: `Structure matches`. Anything else (lines starting with `<` or `>`) means the structure changed.
+What you should see: no `english_note` file. (An empty listing is correct.)
 
-**B11. Check the command inside the code block is unchanged.**
+#### Test B: a Malay report is translated
+
+**C4. Copy the Malay sample into `source/`.**
 
 ```bash
-grep -F 'ls -la source/' state/laporan_mingguan.en.md
+cp tests/samples/laporan_mingguan.md source/
 ```
 
-What you should see: `ls -la source/`. No output means the command was changed.
-
-**B12. Check the link is unchanged.**
+**C5. Run the agent on it.**
 
 ```bash
-grep -oF 'https://example.com/projek' state/laporan_mingguan.en.md
+.venv/bin/python -m folder_watcher run source/laporan_mingguan.md
+```
+
+What you should check: three tool calls, `read_file`, then `translate_text`, then `write_translation`, and a last line starting with `DONE` that names `destination/laporan_mingguan.en.md`. It takes a few seconds. Example:
+
+```text
+11:44:20 INFO    [job 3399] step 1 -> tool read_file {"path":"source/laporan_mingguan.md"}
+11:44:20 INFO    [job 3399] step 1 <- {"text_preview": "<812 chars, shown at DEBUG>", "total_chars": 812, "format": ".md"}
+11:44:21 INFO    [job 3399] step 2 -> tool translate_text {"source_language":"Malay"}
+11:44:25 INFO    [job 3399] chunk 1/1 translated in 3.3s
+11:44:25 INFO    [job 3399] step 2 <- {"translation_id": "t1", "chunks": 1, "protected_items": 2}
+11:44:26 INFO    [job 3399] step 3 -> tool write_translation {"translation_id":"t1"}
+11:44:26 INFO    [job 3399] step 3 <- {"status": "written", "path": "destination/laporan_mingguan.en.md"}
+11:44:26 INFO    [job 3399] DONE in 7.1s: wrote destination/laporan_mingguan.en.md
+```
+
+`protected_items: 2` means the code block and the link were swapped out for placeholders before the text went to the model, and put back afterwards. The model never sees them, so it cannot change them.
+
+**C6. Read the translation.**
+
+```bash
+cat destination/laporan_mingguan.en.md
+```
+
+What you should check: it is in English, with the same headings, lists and code block as the original.
+
+**C7. Check the code block is byte-for-byte unchanged.** This extracts the code block from both files and compares them. The Malay comment inside it must still be in Malay.
+
+```bash
+diff <(sed -n '/^```/,/^```/p' tests/samples/laporan_mingguan.md) <(sed -n '/^```/,/^```/p' destination/laporan_mingguan.en.md) && echo "Code block unchanged"
+```
+
+What you should see: `Code block unchanged`.
+
+**C8. Check the link is unchanged.**
+
+```bash
+grep -oF 'https://example.com/projek' destination/laporan_mingguan.en.md
 ```
 
 What you should see: `https://example.com/projek`.
 
-**B13. Check there is no "thinking" text in the output.**
+**C9. Check the Markdown structure survived.** This compares the headings, list markers and code fences of the original and the translation, line by line.
 
 ```bash
-grep -c '<think>' state/laporan_mingguan.en.md
+diff <(grep -oE '^(#+|-|[0-9]+\.|```)' tests/samples/laporan_mingguan.md) <(grep -oE '^(#+|-|[0-9]+\.|```)' destination/laporan_mingguan.en.md) && echo "Structure matches"
 ```
 
-What you should see: `0`.
+What you should see: `Structure matches`.
 
-**B14. Known limitation: the comment inside the code block.**
+#### More tests (optional)
+
+**C10. A French `.txt` file.**
 
 ```bash
-grep -F '# Papar senarai fail dalam folder sumber' state/laporan_mingguan.en.md || echo "Comment was translated (known limitation until Milestone 4)"
+cp tests/samples/rapport_fr.txt source/
 ```
 
-What you will most likely see today: `Comment was translated (known limitation until Milestone 4)`. The model tends to translate the comment inside the code block even when told not to. A prompt is not a guarantee, so Milestone 4 will protect code blocks **in code**: they will be taken out before translation and put back afterwards. After Milestone 4, this check should print the original Malay comment.
+```bash
+.venv/bin/python -m folder_watcher run source/rapport_fr.txt
+```
 
-**B15. Check the model can tell English from non-English.** The agent's first decision (Milestone 4) is whether a file is already English, in which case it is skipped, not translated. This step asks the model that question about both sample files: `tests/samples/english_note.txt` (a short English note) and the Malay report. It uses the agent settings from `config/config.toml`.
+What you should check: `DONE`, and a new file `destination/rapport_fr.en.txt` in English.
+
+**C11. A long document that needs several chunks.** `long_rapport.md` (about 7,400 characters) is split into 3 chunks, translated one by one, and joined back in order. This takes about half a minute.
 
 ```bash
-.venv/bin/python - <<'EOF'
-from pathlib import Path
-from openai import OpenAI
-from folder_watcher.config import load_config
+cp tests/samples/long_rapport.md source/
+```
 
-cfg = load_config()
-s = cfg.llm.sampling_agent
-client = OpenAI(base_url=cfg.llm.base_url + "/v1", api_key="not-needed")
-for name in ["tests/samples/english_note.txt", "tests/samples/laporan_mingguan.md"]:
-    reply = client.chat.completions.create(
-        model=cfg.llm.alias,
-        messages=[
-            {"role": "system", "content": "Is most of the user's text written in English? "
-             "Answer with exactly one word: yes or no."},
-            {"role": "user", "content": Path(name).read_text()},
-        ],
-        temperature=s.temperature, top_p=s.top_p, presence_penalty=s.presence_penalty,
-        extra_body={"top_k": s.top_k, "min_p": s.min_p}, max_tokens=5,
-    )
-    print(f"{name}: English? {reply.choices[0].message.content.strip()}")
+```bash
+.venv/bin/python -m folder_watcher run source/long_rapport.md
+```
+
+What you should check: three lines `chunk 1/3`, `chunk 2/3`, `chunk 3/3`, then `DONE`. Then check that all 12 sections came back, in order, once each:
+
+```bash
+grep -c '^## Section' destination/long_rapport.en.md
+```
+
+What you should see: `12`.
+
+**C12. An empty file** is skipped without asking the model. (The `cat` command below creates an empty file.)
+
+```bash
+cat > source/vide.txt <<'EOF'
 EOF
 ```
 
-What you should check: **yes** for `english_note.txt` and **no** for `laporan_mingguan.md`. (It gave the same answers in 5 out of 5 runs on the reference machine.) Example:
-
-```text
-tests/samples/english_note.txt: English? yes
-tests/samples/laporan_mingguan.md: English? no
+```bash
+.venv/bin/python -m folder_watcher run source/vide.txt
 ```
 
-This only shows the model *can* make the decision. Actually skipping the English file, with the reason in the log, arrives with the agent in Milestone 4.
+What you should see: `SKIPPED in 0.0s: empty file (no model call)`.
 
-**B16. Terminal 1: stop the model server.** Press **Ctrl+C** in Terminal 1.
+**C13. The step limit.** `--max-steps 1` allows only one model turn, which is not enough to finish, so the job must fail cleanly and write nothing.
+
+```bash
+.venv/bin/python -m folder_watcher run source/rapport_fr.txt --max-steps 1
+```
+
+What you should see: `FAILED ... step limit of 1 reached without skip_file or write_translation`.
+
+**C14. A path escape.** The agent refuses any file outside `source/`, even through `..`.
+
+```bash
+.venv/bin/python -m folder_watcher run source/../tests/samples/english_note.txt
+```
+
+What you should see: `refused: ... is not inside the source folder ...`. No model call is made.
+
+> Running the same test twice never overwrites anything: the second output gets a number, for example `laporan_mingguan.en-1.md`.
+
+### Part D: clean up and stop
+
+**D1. Terminal 2: remove the test files from `source/` and `destination/`.**
+
+```bash
+rm -f source/english_note.txt source/laporan_mingguan.md source/rapport_fr.txt source/long_rapport.md source/vide.txt destination/laporan_mingguan.en*.md destination/rapport_fr.en*.txt destination/long_rapport.en*.md
+```
+
+What you should see: nothing. `ls source/ destination/` now shows both folders empty.
+
+**D2. Terminal 1: stop the model server.** Press **Ctrl+C** in Terminal 1.
 
 What you should see: a line ending in `cleaning up before exit...`, then your normal prompt.
 
-**B17. Terminal 2: check the server is gone.**
+**D3. Terminal 2: check the server is gone.**
 
 ```bash
 curl -s http://127.0.0.1:8080/health
@@ -565,7 +614,7 @@ curl -s http://127.0.0.1:8080/health
 
 What you should see: nothing at all. `curl` cannot connect any more.
 
-**B18. (GPU only) Check the GPU memory was freed.**
+**D4. (GPU only) Check the GPU memory was freed.**
 
 ```bash
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv
@@ -594,7 +643,6 @@ What you should see (on a GPU machine):
 
 | Feature | Available after |
 |---|---|
-| Agent deciding between translate and skip, with tools | Milestone 4 |
 | Watching `source/`, writing to `destination/`, live on/off toggle | Milestone 5 |
 | `scripts/start.sh`, `stop.sh`, `status.sh`, `logs.sh` and the systemd services | Milestone 6 |
 | `python -m folder_watcher check` (currently prints "not built yet") | Milestone 6 |
@@ -713,4 +761,4 @@ The agent loop does not change. The agent is only shown the tools that fit the f
 | `git pull` or `git push` asks for a password | Run `gh auth setup-git`, then try again. |
 | `E: Unable to locate package` | Run `sudo apt update` first. |
 
-*This README is updated as each milestone is finished. It currently reflects Milestones 1 to 3.*
+*This README is updated as each milestone is finished. It currently reflects Milestones 1 to 4.*
