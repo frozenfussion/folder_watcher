@@ -2,7 +2,7 @@
 
 Drop a document into a folder. A small AI agent, running **entirely on your own machine** with an open-weight model, notices it, decides what to do, and (if the document is not in English) writes an English translation to another folder. No cloud, no API keys, no data leaving your computer.
 
-> **Status: Milestones 1 to 4 of 7 are built** (Python package and config, system prerequisites, local model server, the agent and its tools). You can test the model server and run the agent on one file by hand today: see [Testing it](#testing-it). The watcher and the services are **not built yet**, so the "Using it" section still describes *planned* behaviour. The full design is in [`SPEC.md`](SPEC.md).
+> **Status: Milestones 1 to 5 of 7 are built** (Python package and config, system prerequisites, local model server, the agent and its tools, the folder watcher). You can run the watcher in a terminal today, with the live on/off toggle: see [Testing it](#testing-it). The systemd services and the `start.sh`/`stop.sh` scripts are **not built yet**, so the "Using it" section still describes *planned* behaviour. The full design is in [`SPEC.md`](SPEC.md).
 
 ---
 
@@ -308,7 +308,7 @@ What to expect while it builds:
 
 ## Testing it
 
-These tests cover what is built **today** (Milestones 1 to 4): the Python package, the config file, the llama.cpp build, the downloaded model, the local model server, and the agent with its tools, run by hand on one file at a time. Every command below was run on the reference machine (RTX 3070 Ti Laptop GPU, 8 GB) exactly as written.
+These tests cover what is built **today** (Milestones 1 to 5): the Python package, the config file, the llama.cpp build, the downloaded model, the local model server, the agent with its tools, and the folder watcher running in a terminal. Every command below was run on the reference machine (RTX 3070 Ti Laptop GPU, 8 GB) exactly as written.
 
 The model is a language model, so its wording changes from run to run. The steps below tell you what to **check**. Real output is shown only as an *example*.
 
@@ -320,13 +320,13 @@ The model is a language model, so its wording changes from run to run. The steps
 cd ~/projects/folder_watcher
 ```
 
-**A2. Run the unit tests.** They test the config loader, the model-server command line, the path guards, chunking, code protection, the tool registry, and the agent loop (with a fake model). They need no model server.
+**A2. Run the unit tests.** They test the config loader, the model-server command line, the path guards, chunking, code protection, the tool registry, and the agent loop (with a fake model). They also test the watcher and the job queue on temporary folders. They need no model server and take about 20 seconds.
 
 ```bash
 .venv/bin/pytest -q
 ```
 
-What you should see: a final line like `76 passed`, and no `failed`.
+What you should see: a final line like `108 passed`, and no `failed`.
 
 **A3. Check which backend llama.cpp was built for.**
 
@@ -433,7 +433,7 @@ tool call: get_weather {"city":"Penang"}
 
 ### Part C: the agent, on one file at a time
 
-The watcher is not built yet, so you hand the agent one file yourself with the `run` command. The agent only reads files inside `source/`, so each test first copies a sample file there. Keep the model server running in Terminal 1 and type these in **Terminal 2**.
+Here you hand the agent one file yourself with the `run` command, without the watcher (Part E shows the watcher). The agent only reads files inside `source/`, so each test first copies a sample file there. Keep the model server running in Terminal 1 and type these in **Terminal 2**.
 
 #### Test A: an English note is skipped
 
@@ -592,12 +592,150 @@ What you should see: `refused: ... is not inside the source folder ...`. No mode
 
 > Running the same test twice never overwrites anything: the second output gets a number, for example `laporan_mingguan.en-1.md`.
 
-### Part D: clean up and stop
+### Part E: the watcher
 
-**D1. Terminal 2: remove the test files from `source/` and `destination/`.**
+The watcher notices new files in `source/` by itself and hands each one to the agent. You need a **third terminal tab** now:
+
+- Terminal 1: the model server (still running from B2).
+- Terminal 2: the watcher.
+- Terminal 3: where you drop files and change settings.
+
+**E1. Terminal 2: empty `source/` and `destination/` first.** This removes the test files from Part C, so the watcher starts with an empty `source/`.
 
 ```bash
 rm -f source/english_note.txt source/laporan_mingguan.md source/rapport_fr.txt source/long_rapport.md source/vide.txt destination/laporan_mingguan.en*.md destination/rapport_fr.en*.txt destination/long_rapport.en*.md
+```
+
+What you should see: nothing.
+
+**E2. Terminal 2: start the watcher.** It runs in this terminal until you press Ctrl+C.
+
+```bash
+.venv/bin/python -m folder_watcher watch
+```
+
+What you should see: `model server is ready`, then a line starting `watching .../source for new .txt, .md files; watching is enabled. 0 file(s) already there are ignored.` Leave it running.
+
+**E3. Terminal 3: go to the project folder.**
+
+```bash
+cd ~/projects/folder_watcher
+```
+
+#### Watcher test 1: a new Malay document is translated
+
+**E4. Terminal 3: drop the Malay report into `source/`.** A plain `cp` is all it takes. Your own Bahasa Malaysia `.txt` files work the same way.
+
+```bash
+cp tests/samples/laporan_mingguan.md source/
+```
+
+What you should see **in Terminal 2**: `new file laporan_mingguan.md (created); waiting until it stops changing`, then about 2 seconds later `queued laporan_mingguan.md`, then the agent's steps, and finally `DONE ... wrote destination/laporan_mingguan.en.md`. The 2 seconds are `stable_seconds` in the config: the watcher waits until the file has stopped changing, so it never reads a half-copied file. From drop to done took about 9 seconds on the reference machine.
+
+**E5. Terminal 3: check the translation arrived.**
+
+```bash
+ls destination/
+```
+
+What you should see: `laporan_mingguan.en.md`.
+
+#### Watcher test 2: an English note is skipped
+
+**E6. Terminal 3: drop the English note.**
+
+```bash
+cp tests/samples/english_note.txt source/
+```
+
+What you should see **in Terminal 2**: the agent calls `read_file`, then `skip_file`, and the job ends with `SKIPPED in ...s:` followed by the agent's reason, for example `Document is already in English`.
+
+**E7. Terminal 3: check nothing new was written.**
+
+```bash
+ls destination/
+```
+
+What you should see: still only `laporan_mingguan.en.md`.
+
+#### Watcher test 3: switch watching off and on, without a restart
+
+**E8. Terminal 3: switch watching off.** This edits `watch.enabled` in `config/config.toml`. The watcher re-reads the file every second.
+
+```bash
+.venv/bin/python -m folder_watcher config set watch.enabled false
+```
+
+What you should see: `watch.enabled: True -> False`. **In Terminal 2**, within a second: `watching disabled`.
+
+**E9. Terminal 3: drop a file while watching is off.**
+
+```bash
+cat > source/semasa_tutup.txt <<'EOF'
+Fail ini dihantar semasa pemantauan dimatikan. Ia tidak sepatutnya diterjemahkan.
+EOF
+```
+
+What you should see **in Terminal 2**: `ignored semasa_tutup.txt: watching is disabled (it will not be processed later)`.
+
+**E10. Terminal 3: switch watching back on.**
+
+```bash
+.venv/bin/python -m folder_watcher config set watch.enabled true
+```
+
+What you should see: `watch.enabled: False -> True`. **In Terminal 2**: `watching enabled`, and **nothing else**. The file from E9 is not picked up now: files that arrive while watching is off are ignored for good.
+
+**E11. Terminal 3: confirm the file from E9 was not translated.**
+
+```bash
+ls destination/
+```
+
+What you should see: still only `laporan_mingguan.en.md`. There is no `semasa_tutup.en.txt`.
+
+**E12. Terminal 3: drop a new file now that watching is on.**
+
+```bash
+cat > source/selepas_buka.txt <<'EOF'
+Fail ini dihantar selepas pemantauan dihidupkan semula. Ia sepatutnya diterjemahkan.
+EOF
+```
+
+What you should see **in Terminal 2**: the agent translates it and ends with `DONE ... wrote destination/selepas_buka.en.txt`.
+
+#### Watcher test 4: files already in `source/` are ignored
+
+**E13. Terminal 2: stop the watcher.** Press **Ctrl+C** in Terminal 2.
+
+What you should see: `stopping (SIGINT): no new files will be taken`, then `watcher stopped`. The model server in Terminal 1 keeps running.
+
+**E14. Terminal 2: start the watcher again.** `source/` now holds four files from the tests above.
+
+```bash
+.venv/bin/python -m folder_watcher watch
+```
+
+What you should see: `... 4 file(s) already there are ignored.` and then nothing more. None of the four files is processed again.
+
+**E15. Terminal 3: confirm nothing new was written.** Wait a few seconds first.
+
+```bash
+ls destination/
+```
+
+What you should see: the same two files as before, `laporan_mingguan.en.md` and `selepas_buka.en.txt`.
+
+**E16. Terminal 2: stop the watcher.** Press **Ctrl+C** in Terminal 2.
+
+> If you stop the watcher while it is in the middle of a job, that job is **abandoned** at the next safe point (between two model calls) and nothing is written for it; the log says `ABANDONED` and names the file. Copy the file into `source/` again later to process it. If the model server stops while the watcher runs, the job is **not** lost: the log says `stays queued, retrying in 5s` (then 10, 20, 40, 60 seconds) and the job runs as soon as the model server is back.
+
+### Part D: clean up and stop
+
+**D1. Terminal 3: remove the test files from `source/` and `destination/`.**
+
+```bash
+rm -f source/english_note.txt source/laporan_mingguan.md source/semasa_tutup.txt source/selepas_buka.txt destination/laporan_mingguan.en*.md destination/selepas_buka.en*.txt
 ```
 
 What you should see: nothing. `ls source/ destination/` now shows both folders empty.
@@ -606,7 +744,7 @@ What you should see: nothing. `ls source/ destination/` now shows both folders e
 
 What you should see: a line ending in `cleaning up before exit...`, then your normal prompt.
 
-**D3. Terminal 2: check the server is gone.**
+**D3. Terminal 3: check the server is gone.**
 
 ```bash
 curl -s http://127.0.0.1:8080/health
@@ -643,7 +781,6 @@ What you should see (on a GPU machine):
 
 | Feature | Available after |
 |---|---|
-| Watching `source/`, writing to `destination/`, live on/off toggle | Milestone 5 |
 | `scripts/start.sh`, `stop.sh`, `status.sh`, `logs.sh` and the systemd services | Milestone 6 |
 | `python -m folder_watcher check` (currently prints "not built yet") | Milestone 6 |
 | CPU-only mode (`gpu_layers = "0"`) and the full acceptance checklist | Milestone 7 |
@@ -652,7 +789,7 @@ What you should see (on a GPU machine):
 
 ## Using it (planned)
 
-> **Not available yet.** The watcher arrives in Milestone 5 and the `scripts/start.sh`, `logs.sh`, `status.sh` and `stop.sh` services in Milestone 6. These commands are the **plan** from `SPEC.md` and will be confirmed and corrected once they are built. What you can test today is in [Testing it](#testing-it).
+> **Not available yet as services.** The watcher itself works today in a terminal (see [Testing it](#testing-it), Part E), and `config set watch.enabled false` works as shown below. The `scripts/start.sh`, `logs.sh`, `status.sh` and `stop.sh` services arrive in Milestone 6. These commands are the **plan** from `SPEC.md` and will be confirmed and corrected once they are built. What you can test today is in [Testing it](#testing-it).
 
 Start the services (this also loads the model, which can take a minute):
 
@@ -761,4 +898,4 @@ The agent loop does not change. The agent is only shown the tools that fit the f
 | `git pull` or `git push` asks for a password | Run `gh auth setup-git`, then try again. |
 | `E: Unable to locate package` | Run `sudo apt update` first. |
 
-*This README is updated as each milestone is finished. It currently reflects Milestones 1 to 4.*
+*This README is updated as each milestone is finished. It currently reflects Milestones 1 to 5.*
