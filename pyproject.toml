@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "folder-watcher"
+version = "0.1.0"
+description = "On-prem agent that translates new documents in source/ to English with a local model."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "watchdog>=6.0",
+    "openai>=1.40",
+    # tomllib is in the standard library from 3.11; older Pythons need the backport.
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+# Only used by scripts/download_model.sh, never at runtime.
+download = ["huggingface_hub>=1.0"]
+# Reserved for future reader tools (SPEC.md section 8.3). Empty in v1.
+docx = []
+pdf = []
+
+[project.scripts]
+folder-watcher = "folder_watcher.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs a running model server; skipped unless -m integration is given"]
+addopts = "-m 'not integration'"

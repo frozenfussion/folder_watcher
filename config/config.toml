@@ -1,0 +1,46 @@
+# Folder Watcher configuration. See SPEC.md section 6.
+# Relative paths resolve against the project root.
+
+[watch]
+enabled = true                      # LIVE: re-read on every event. false = ignore new files.
+source_dir = "source"
+destination_dir = "destination"
+extensions = [".txt", ".md"]        # LIVE. Each must have a registered reader tool.
+ignore_hidden = true                # skip dotfiles and editor temp files
+stable_seconds = 2.0                # file size must be unchanged this long before processing
+stable_timeout_seconds = 60.0       # give up waiting for a file to settle after this long
+
+[agent]
+english_action = "skip"             # "skip" = do nothing; "copy" = copy untouched to destination
+output_suffix = ".en"               # report.md -> report.en.md
+max_steps = 8
+job_timeout_seconds = 600
+chunk_max_chars = 3000              # translation chunk size, tune for the context window
+
+[llm]                               # NOT live. Changing these needs a service restart.
+host = "127.0.0.1"                  # localhost only, enforced by the config loader
+port = 8080
+model_path = "models/Qwen3.5-9B-Q4_K_M.gguf"
+alias = "qwen3.5-9b"
+ctx_size = 8192
+gpu_layers = "auto"                 # "auto", "all", "0" (force CPU), or a number. Verified in llama-server --help.
+parallel = 1
+extra_args = []                     # escape hatch for llama-server flags
+
+[llm.sampling.agent]                # used for tool-calling turns
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+min_p = 0.0
+presence_penalty = 1.5
+
+[llm.sampling.translate]            # used for translation calls; presence_penalty 1.5 dropped repeated words in tests, so 0.0
+temperature = 0.3
+top_p = 0.8
+top_k = 20
+min_p = 0.0
+presence_penalty = 0.0
+
+[logging]
+level = "INFO"
+trace_agent = true                  # print every tool call and result, for teaching
