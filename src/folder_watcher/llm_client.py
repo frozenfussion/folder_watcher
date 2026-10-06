@@ -59,7 +59,11 @@ class LLMClient:
     def __init__(self, llm: LLMConfig, timeout: float = 600) -> None:
         self.llm = llm
         # The key is a dummy: the server is local and has no key set.
-        self._client = OpenAI(base_url=llm.base_url + "/v1", api_key="local", timeout=timeout, max_retries=2)
+        # Short connect timeout, long read timeout: with WSL "mirrored" networking a connection
+        # to a stopped server hangs instead of being refused, so without this a down server
+        # would only be noticed after the full read timeout.
+        self._client = OpenAI(base_url=llm.base_url + "/v1", api_key="local", max_retries=2,
+                              timeout=openai.Timeout(timeout, connect=5.0))
 
     def chat(self, messages: list[dict], profile: SamplingProfile,
              tools: list[dict] | None = None, max_tokens: int | None = None) -> Reply:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+import time
 from pathlib import Path
 from dataclasses import fields, is_dataclass
 
@@ -99,17 +101,51 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return run_watch(Path(args.config))
 
 
+def cmd_llm_wait(args: argparse.Namespace) -> int:
+    """Wait until the model server answers /health (used by the systemd unit's ExecStartPost)."""
+    from .llm_client import LLMClient
+
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 1
+    print(f"waiting for the model to load at {cfg.llm.base_url} (up to {args.timeout:.0f}s)", flush=True)
+    client = LLMClient(cfg.llm)
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        if client.healthy():
+            print("model server is healthy", flush=True)
+            return 0
+        if args.main_pid and not _alive(args.main_pid):
+            # llama-server already exited (e.g. model file missing): fail now, not after the timeout.
+            print("the model server exited while loading; see the lines above", file=sys.stderr)
+            return 1
+        time.sleep(1)
+    print(f"model server did not become healthy within {args.timeout:.0f}s", file=sys.stderr)
+    return 1
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    from .checks import run_checks
+
+    return run_checks(Path(args.config))
+
+
 def cmd_llm_server(args: argparse.Namespace) -> int:
     from .launch_llm import main as launch
 
     return launch()
-
-
-def not_yet(milestone: str):
-    def run(args: argparse.Namespace) -> int:
-        print(f"'{args.command}' is not built yet ({milestone}).", file=sys.stderr)
-        return 2
-    return run
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -119,7 +155,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("watch", help="watch source/ and process new files (Ctrl+C to stop)").set_defaults(func=cmd_watch)
     sub.add_parser("llm-server", help="start llama-server from config").set_defaults(func=cmd_llm_server)
-    sub.add_parser("check", help="preflight checks").set_defaults(func=not_yet("Milestone 6"))
+    sub.add_parser("check", help="preflight checks with plain-language fixes").set_defaults(func=cmd_check)
+    p = sub.add_parser("llm-wait", help="wait until the model server is healthy (used by systemd)")
+    p.add_argument("--timeout", type=float, default=280)
+    p.add_argument("--main-pid", type=int, default=0, help="stop waiting if this process exits")
+    p.set_defaults(func=cmd_llm_wait)
 
     p = sub.add_parser("run", help="run the agent on one file in source/ (no watcher)")
     p.add_argument("file", help="path of a file inside source/")

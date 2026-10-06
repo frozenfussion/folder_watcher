@@ -40,6 +40,19 @@ class Job:
         return self.path.name
 
 
+def sd_notify(message: str) -> None:
+    """Tell systemd about our state (Type=notify). Does nothing outside systemd."""
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):  # abstract socket namespace
+        address = "\0" + address[1:]
+    import socket
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        sock.connect(address)
+        sock.sendall(message.encode())
+
+
 def wait_until_stable(path: Path, stable_seconds: float, timeout: float, stop: threading.Event,
                       poll: float = 0.25) -> str:
     """Wait until size and mtime stop changing for stable_seconds.
@@ -268,12 +281,16 @@ def run_watch(config_path: Path) -> int:
     state = "enabled" if cfg.watch.enabled else "DISABLED (set watch.enabled = true to start)"
     log.info("watching %s for new %s files; watching is %s. %d file(s) already there are ignored. "
              "Stop with Ctrl+C.", cfg.watch.source_dir, ", ".join(cfg.watch.extensions), state, existing)
+    # Under systemd (Type=notify) this is what makes `systemctl start` return: only now is it
+    # safe to drop files, because files present before this point are treated as existing.
+    sd_notify(f"READY=1\nSTATUS=watching {cfg.watch.source_dir}")
 
     while not stop.wait(1.0):
         watcher.config()  # notice a config edit right away, not only on the next file
 
     # --- defined shutdown: stop watching, drop jobs not started, abandon the current one ---
     log.info("stopping (%s): no new files will be taken", reason["signal"])
+    sd_notify("STOPPING=1")
     watcher.stop()
     for job in jobs.pending():
         ledger.record(job.key, job.path.name, "not-started")
@@ -287,5 +304,6 @@ def run_watch(config_path: Path) -> int:
     if current is not None and ledger.status(current.key) == "queued":
         # It never finished (abandoned, or still waiting for the model server).
         ledger.record(current.key, current.path.name, "abandoned")
+        log.warning("not processed: %s (copy it into source/ again to process it)", current)
     log.info("watcher stopped")
     return 0
