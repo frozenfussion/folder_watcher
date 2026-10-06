@@ -60,9 +60,11 @@ Alternatives for students with less memory are documented in the README (Qwen3.5
 ### Qwen3.5 behaviour to respect
 Taken from the model card:
 - Qwen3.5 **thinks by default**, emitting `<think>...</think>` before the answer. For this project, **disable thinking**: it wastes tokens and time on a translation task and pollutes tool-call output. The model card's way to do this is the chat-template argument `enable_thinking: false` (`chat_template_kwargs`). `VERIFY` how the installed `llama-server` accepts it: either a server flag (look for `--chat-template-kwargs` in `llama-server --help`) or a per-request field. Use whichever works and document it in a comment.
+  - **Verified 2026-10-06 (llama.cpp b11434):** `--chat-template-kwargs '{"enable_thinking":false}'` works but the server logs that it is *deprecated* and says to use **`--reasoning off`**. `launch_llm.py` uses `--reasoning off`; the log then shows `chat template, thinking = 0` and replies contain no `<think>` text and an empty `reasoning_content`. A request that sends `chat_template_kwargs: {"enable_thinking": true}` still turns thinking back on (it then spent all 300 test tokens thinking and returned no answer), so the client must never send it.
 - Qwen3.5 does **not** support the `/think` and `/nothink` soft switches.
 - Recommended sampling for non-thinking, general tasks: `temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0`.
   - `VERIFY` the effect of `presence_penalty=1.5` on translation. It discourages repeating tokens, which can hurt faithful translation of repetitive text. If translations look wrong, lower it (the model card says 0 to 2 is the allowed range) and record the final value in config.
+    - **Verified 2026-10-06:** on a short French Markdown text with repeated phrases, `1.5` made the model drop repeated words to avoid repetition ("Check the logs / the backups" became "Check logs / backups") in 2 of 2 runs; `0.0` kept them. Translation keeps `presence_penalty = 0.0`; the agent profile keeps `1.5` (tool calls worked with it).
   - Translation calls and tool-calling calls may use different sampling profiles. Put both in config.
 - The model card recommends at least 128K context to preserve its thinking ability. That does not apply here (thinking is off) and will not fit in 8 GB VRAM. Use a modest context (default 8192) and chunk documents.
 
@@ -203,7 +205,7 @@ port = 8080
 model_path = "models/Qwen3.5-9B-Q4_K_M.gguf"
 alias = "qwen3.5-9b"
 ctx_size = 8192
-gpu_layers = "auto"                 # "auto", "all", "0" (force CPU), or a number. VERIFY accepted values.
+gpu_layers = "auto"                 # "auto", "all", "0" (force CPU), or a number. Verified in --help (default auto).
 parallel = 1
 extra_args = []                     # escape hatch for llama-server flags
 
@@ -275,7 +277,7 @@ The agent's system prompt (in `prompts.py`) must say, in plain words:
 - Mixed documents: translate if the **majority** of the text is not English.
 - Always finish with exactly one of `skip_file` or `write_translation`.
 
-`VERIFY` early that Qwen3.5-9B Q4 follows this reliably through `llama-server`'s tool-calling support (`--jinja` is needed for tool calls; confirm in `--help`). If tool calling is flaky, improve the prompt and tool descriptions first. Do not silently hard-code the decision in Python, because the lesson is the model choosing. If a deterministic safety net is added (for example "if the loop ended with no terminal tool, log failure"), keep it visible in the logs.
+`VERIFY` early that Qwen3.5-9B Q4 follows this reliably through `llama-server`'s tool-calling support (`--jinja` is needed for tool calls; confirm in `--help`). *Smoke test 2026-10-06:* `--jinja` is on by default in b11434 (passed explicitly anyway). With one dummy tool, the model returned a proper OpenAI-style `tool_calls` entry with valid JSON arguments when the tool was relevant, and answered directly without a tool call when it was not. Reliability with the real agent prompt is still to be tested in Milestone 4. If tool calling is flaky, improve the prompt and tool descriptions first. Do not silently hard-code the decision in Python, because the lesson is the model choosing. If a deterministic safety net is added (for example "if the loop ended with no terminal tool, log failure"), keep it visible in the logs.
 
 ### 7.5 Tools (v1)
 
@@ -295,6 +297,7 @@ Requirements for the prompt in `prompts.py`:
 - Translate to English. Output **only** the translation, with no preamble, no notes, and no `<think>` text.
 - Preserve structure: Markdown headings, lists, tables, emphasis, blank lines, and line breaks.
 - **Do not translate** fenced code blocks, inline code, URLs, file paths, or HTML tags. Translate comments only if the block is clearly prose.
+- **Finding 2026-10-06:** the prompt alone does not protect code blocks. In 4 of 4 test runs the model translated a comment inside a fenced `bash` block. Therefore `translate_text` must protect fenced code blocks **in code** (replace them with placeholders before the model call and restore them afterwards, or never send them), not only through the prompt.
 - Keep proper nouns as they are, unless they have an established English form.
 - If a chunk is already English, return it unchanged.
 
@@ -362,6 +365,15 @@ Command line built from config (`VERIFY` every flag name and value with `vendor/
 - `llm.extra_args`
 
 The server README also lists `--fit` ("automatically adjusts settings to fit device memory"). `VERIFY` its syntax and enable it if it behaves well, since it helps on small GPUs and unknown machines.
+**Verified 2026-10-06:** `-fit, --fit [on|off]` is **on by default** and only adjusts arguments that were not set explicitly (minimum context 4096, 1024 MiB safety margin). On the reference machine it reported "projected to use 5279 MiB vs 7045 MiB free … no changes needed". We leave it at its default and do not pass it.
+
+Flags `launch_llm.py` passes in addition to the list above (all checked in `--help` of b11434):
+- `--reasoning off`: turns thinking off (replaces the deprecated `--chat-template-kwargs` route).
+- `--offline`: no network access at runtime.
+- `--no-ui`: no browser UI; this project only uses the API.
+- `--cors-origins localhost`: WSL2 forwards `localhost` to Windows, so without this any web page in the Windows browser could call the model server (llama-server warns about this at startup).
+- `--log-colors off`: plain text in journald.
+- `-ngl` is left out entirely on a CPU build (`vendor/BACKEND` = `cpu`).
 
 Health: `GET /health` returns ready when the model is loaded. Chat endpoint: `POST /v1/chat/completions`.
 
@@ -378,6 +390,7 @@ llama.cpp's build documentation states the CUDA toolkit is a prerequisite, and i
 **Run time**: `gpu_layers = "auto"` offloads as many layers as fit. On a CPU-only build the flag has no effect. `gpu_layers = "0"` forces CPU even on a GPU machine.
 
 ### 9.2 Memory budget (reference machine: 8 GB VRAM)
+- **Measured 2026-10-06 (RTX 3070 Ti Laptop, 8 GB):** `offloaded 33/33 layers to GPU`, CUDA model buffer 4861 MiB (the 546 MiB token-embedding table stays CPU-mapped), KV cache 256 MiB at `ctx_size` 8192 (only 8 of 32 layers use attention; the rest are recurrent with a 50 MiB state), compute buffer 112 MiB. Total VRAM went from 794 MiB idle to 6259 MiB, and back to 794 MiB after stop. About 52-53 tokens/s generation; a warm start (file in page cache) is ready in about 3 s.
 - Q4_K_M weights are about 5.7 GB. The desktop/WSL display stack was already using roughly 0.6 GB in the reference `nvidia-smi` output, leaving about 7.5 GB.
 - The KV cache grows with `ctx_size`. Start at 8192. If the server fails to start with an out-of-memory error, reduce `ctx_size` first, then fall back to the 4B model (README documents this).
 - If a student's machine has less memory than the model needs, `gpu_layers = "auto"` will leave layers on the CPU. It will work, but slower.
@@ -394,7 +407,7 @@ Claude Code running on Aziz's machine **cannot enter a sudo password**. Therefor
 4. PATH problems must be solved **in the current shell**, never by telling Aziz to close the terminal. Scripts use absolute paths where possible. When an environment change is unavoidable, give the `export ...` line to run now and also persist it in `~/.bashrc`.
 
 ### 10.1 `scripts/system/01_base_packages.sh`
-Installs build prerequisites with `apt`: at least `build-essential`, `cmake`, `git`, `curl`, `python3-venv`, `python3-pip`, `pkg-config`, and `libcurl4-openssl-dev` if the llama.cpp build asks for it (`VERIFY`). Runs `apt update` first.
+Installs build prerequisites with `apt`: at least `build-essential`, `cmake`, `git`, `curl`, `python3-venv`, `python3-pip`, `pkg-config`, and `libssl-dev`. Runs `apt update` first. (Verified 2026-10-06: llama.cpp deprecated `LLAMA_CURL` and now uses optional OpenSSL for HTTPS, so `libcurl4-openssl-dev` is not needed; `libssl-dev` only silences a cmake warning.)
 
 ### 10.2 `scripts/system/02_cuda_toolkit_wsl.sh`
 Only for machines with an NVIDIA GPU. Installs the **CUDA toolkit** inside WSL. Critical, from NVIDIA's WSL user guide:
@@ -475,6 +488,7 @@ Keep them minimal and pinned by lower bound in `pyproject.toml`.
 - `watchdog`: filesystem events.
 - `openai`: client for the OpenAI-compatible endpoint (point `base_url` at the local server; the API key is a dummy).
 - `tomli` only if Python < 3.11.
+- `huggingface_hub`, as the optional `download` extra: used only by `scripts/download_model.sh`, never at runtime.
 - `pytest` as a dev extra.
 - Optional extras reserved for future readers (`docx`, `pdf`): declare the extras group, leave it empty in v1.
 
@@ -550,6 +564,20 @@ Each was read from a source on the date of writing (2026-10-06). Re-check anythi
 - Qwen3.5-4B GGUF: `hf.co/unsloth/Qwen3.5-4B-GGUF`. Q4_K_M is 2,740,937,888 bytes. Q5_K_M is 3,143,656,608 bytes.
 - Qwen3.5 model card (unsloth mirror of Qwen/Qwen3.5-9B): thinking on by default, `enable_thinking: false` via chat template kwargs, sampling recommendations, no `/think` switches.
 - llama.cpp `docs/build.md`: CUDA toolkit required, `-DGGML_CUDA=ON`, no prebuilt Linux CUDA binaries listed.
+- llama.cpp build actually used: tag `b11434`, commit `5e03bdd87` (v0.6.0 + 5 commits), CUDA 13.1, gcc 13.3. Flags confirmed with its `llama-server --help`.
 - llama.cpp `tools/server/README.md`: `-m`, `--host` (default 127.0.0.1), `--port` (default 8080), `-c`, `-ngl` (accepts `auto` or `all`), `--jinja`, `--alias`, `-np`, `--fit`, `/health`, `/v1/chat/completions`, function calling.
 - NVIDIA CUDA on WSL user guide: never install an NVIDIA Linux driver inside WSL2; use WSL-Ubuntu toolkit packages; avoid `cuda`, `cuda-<ver>`, `cuda-drivers`.
 - Microsoft WSL docs: `[boot] systemd=true` in `/etc/wsl.conf`, restart with `wsl.exe --shutdown`; the `[boot]` section is documented as available on Windows 11 and Server 2022; check version with `wsl --version`.
+
+---
+
+## Deviations
+
+- **10.1**: `libcurl4-openssl-dev` replaced by `libssl-dev`. llama.cpp deprecated `LLAMA_CURL` and uses optional OpenSSL instead (checked in its `CMakeLists.txt` on 2026-10-06).
+- **10.2**: `02_cuda_toolkit_wsl.sh` also purges Ubuntu's `nvidia-cuda-toolkit` and any `libnvidia-compute-*` / Linux driver packages if present. Reason: Ubuntu's toolkit depends on `libnvidia-compute-*`, which installs a second `libcuda.so` in `/usr/lib/x86_64-linux-gnu`, which NVIDIA's WSL guide forbids. Found on the reference machine. Packages are selected by Debian source package (`nvidia-cuda-toolkit`, `cub`, `libthrust`, `libcudacxx`, `nvidia-graphics-drivers-*`) and purged in one transaction, after an `apt-get -s` dry run that aborts if apt would install anything. (A first version purged only the driver packages; apt then installed `libnvidia-compute-580-server` to keep the CUDA 12.0 libraries satisfied.)
+- **12**: the CLI exists from Milestone 1, but only `config get` works so far; the other commands print the milestone that builds them.
+- **3 / 9**: thinking is disabled with `--reasoning off`, not `--chat-template-kwargs`. The server marks the kwargs route as deprecated.
+- **9**: `launch_llm.py` adds `--offline`, `--no-ui`, `--cors-origins localhost` and `--log-colors off` (reasons in section 9). `--fit` is not passed because it is on by default.
+- **12a**: `huggingface_hub` was added as the optional `download` extra, so the model download tool lives in `.venv` and not system-wide.
+- **9.1**: `build_llama.sh` builds the newest tag (llama.cpp tags every master build `bNNNN`; `LLAMA_REF` overrides it), compiles only the `llama-server` target, and uses `CMAKE_CUDA_ARCHITECTURES=native` to build only for the local GPU (about 5.5 minutes instead of compiling for every architecture).
+
