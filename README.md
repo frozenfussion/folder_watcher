@@ -2,7 +2,7 @@
 
 Drop a document into a folder. A small AI agent, running **entirely on your own machine** with an open-weight model, notices it, decides what to do, and (if the document is not in English) writes an English translation to another folder. No cloud, no API keys, no data leaving your computer.
 
-> **Status: Milestones 1 to 6 of 7 are built** (Python package and config, system prerequisites, local model server, the agent and its tools, the folder watcher, and the services with `start.sh`, `stop.sh`, `status.sh`, `logs.sh` and `check`). See [Using it](#using-it). The last milestone (the full acceptance checklist, including CPU-only mode) is **not done yet**, so the "Using it" section still describes *planned* behaviour. The full design is in [`SPEC.md`](SPEC.md).
+> **Status: built and in use.** The model server, the agent, the watcher and the two services all work; see [Using it](#using-it). Not yet done: the final acceptance checklist from `SPEC.md`, including a CPU-only test run. The full design is in [`SPEC.md`](SPEC.md).
 
 ---
 
@@ -33,6 +33,8 @@ flowchart LR
         A <--> R[Tool registry]
         CFG[(config/config.toml<br/>live toggle)] -. read on every event .-> W
     end
+
+    WATCHER -. "Wants= + After=<br/>(starts it first)" .-> LLM
 
     S -- file-created event --> W
 
@@ -82,7 +84,7 @@ flowchart TD
 | Service | What it runs | Notes |
 |---|---|---|
 | `folder-watcher-llm` | the local model server (llama.cpp) | Loads the model into GPU memory. Slow to start, heavy. |
-| `folder-watcher` | the Python watcher and agent | Starting it starts the model server first. |
+| `folder-watcher` | the Python watcher and agent | Starting it starts the model server first (`Wants=` + `After=`). If the model server restarts, the watcher keeps running and waits for it. |
 
 Neither starts at boot or login. You start them when you want them.
 
@@ -795,6 +797,22 @@ What you should see (on a GPU machine):
 
 ## Using it
 
+### Controlling the services
+
+Run these in the project folder (`cd ~/projects/folder_watcher`).
+
+| Do this | Command | What you should see |
+|---|---|---|
+| Start | `scripts/start.sh` | `READY after ...s: you can drop files into .../source/ now.` |
+| Stop | `scripts/stop.sh` | Both services `inactive`, GPU memory freed, `Stopped in ...s.` |
+| Restart | `scripts/restart.sh` | The stop lines, then `READY after ...s`. |
+| Status | `scripts/status.sh` | Both services `active` or `inactive`, model health, GPU memory, `watch.enabled`, and `All checks passed.` |
+| Logs | `scripts/logs.sh` | The agent's steps as files arrive; **Ctrl+C** stops following (the services keep running). |
+| Watching off | `.venv/bin/python -m folder_watcher config set watch.enabled false` | `watch.enabled: True -> False`; files arriving now are ignored for good. |
+| Watching on | `.venv/bin/python -m folder_watcher config set watch.enabled true` | `watch.enabled: False -> True`; new files are processed again. No restart needed. |
+
+**The services never start on their own.** After you close WSL or reboot Windows, run `scripts/start.sh` again.
+
 Day to day, the model server and the watcher run as two **systemd user services**. They **never start by themselves** (not at boot, not at login): you start them with `scripts/start.sh` and stop them with `scripts/stop.sh`. Every command below was run on the reference machine exactly as written.
 
 ### Once: install the services
@@ -998,7 +1016,7 @@ The agent loop does not change. The agent is only shown the tools that fit the f
 | `start.sh` says `the services did not start` and the log shows `model not found at .../models/...gguf` | Run `scripts/download_model.sh`, then `scripts/start.sh` again. (`start.sh` has already stopped both services again.) |
 | `Warning: The unit file ... changed on disk. Run 'systemctl --user daemon-reload'` | Run `scripts/install_services.sh` again; it rewrites the service files and reloads them. |
 | A file was dropped but never processed, and the log says `not processed: <file>` or `ABANDONED` | The services were stopped or restarted while that file was waiting or being translated. Copy it into `source/` again. |
-| The model server stopped on its own (crash or `systemctl --user kill`) | It restarts by itself within a few seconds, and the watcher restarts with it. Anything that was waiting at that moment must be copied into `source/` again (see the row above). |
+| The model server stopped on its own (crash or `systemctl --user kill`) | It restarts by itself within a few seconds. The watcher keeps running; files waiting at that moment are processed once the model is back (the log says `stays queued, retrying in ...`). |
 | After the model server stops, the watcher needs about 20 seconds to notice | Expected with WSL's `networkingMode=mirrored`: a connection to a stopped server hangs instead of being refused, so the watcher waits for a 5-second timeout (three tries). |
 | I copied a file into `source/` again and nothing happened | A file with that name was already there, so the copy was an edit, not a new arrival. Run `rm source/<name>` first, then copy it again. |
 | A file dropped right after `start.sh`, before `READY`, was ignored | Wait for the `READY` line. Files present when the watcher starts count as "already there" and are never processed. |

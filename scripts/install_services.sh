@@ -60,7 +60,10 @@ write_unit folder-watcher.service "# Installed by $ROOT/scripts/install_services
 # this service never starts by itself. Start it with scripts/start.sh.
 [Unit]
 Description=Folder Watcher: agent that translates new documents
-Requires=folder-watcher-llm.service
+# Wants=, not Requires=: starting the watcher still starts the model first (After=), but
+# when systemd restarts the model after a crash, the watcher keeps running and its queued
+# jobs wait for the model instead of being dropped. scripts/stop.sh stops both.
+Wants=folder-watcher-llm.service
 After=folder-watcher-llm.service
 
 [Service]
