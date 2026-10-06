@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 from dataclasses import fields, is_dataclass
 
-from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config
+from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config, set_value
 from .guards import GuardError, resolve_job_file
+from .logging_setup import setup_logging
 
 
 def _lookup(cfg: object, dotted: str) -> object:
@@ -36,16 +37,26 @@ def cmd_config(args: argparse.Namespace) -> int:
             print(f"unknown config key: {args.key}", file=sys.stderr)
             return 1
         return 0
-    print("config set is not built yet (Milestone 5).", file=sys.stderr)
-    return 2
-
-
-def setup_logging(level: str) -> None:
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S",
-                        stream=sys.stdout)
-    # The HTTP libraries log every request at INFO; that drowns the agent trace.
-    for noisy in ("httpx", "httpx2", "httpcore", "openai"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    if args.value is None:
+        print("config set needs a value, for example:  config set watch.enabled false", file=sys.stderr)
+        return 1
+    try:
+        old = _lookup(cfg, args.key)
+        set_value(Path(args.config), args.key, args.value)
+        new = _lookup(load_config(args.config), args.key)
+    except KeyError:
+        print(f"not changed: unknown config key {args.key!r}", file=sys.stderr)
+        return 1
+    except ConfigError as e:
+        print(f"not changed: {e}", file=sys.stderr)
+        return 1
+    print(f"{args.key}: {old} -> {new}")
+    section = args.key.split(".")[0]
+    if section in ("watch", "agent"):
+        print("A running watcher picks this up within a second; no restart needed.")
+    else:
+        print(f"[{section}] settings are not live: restart the services for this to take effect.")
+    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -82,6 +93,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 1 if result.status == "failed" else 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    from .watcher import run_watch
+
+    return run_watch(Path(args.config))
+
+
 def cmd_llm_server(args: argparse.Namespace) -> int:
     from .launch_llm import main as launch
 
@@ -100,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="path to config.toml")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("watch", help="run the watcher").set_defaults(func=not_yet("Milestone 5"))
+    sub.add_parser("watch", help="watch source/ and process new files (Ctrl+C to stop)").set_defaults(func=cmd_watch)
     sub.add_parser("llm-server", help="start llama-server from config").set_defaults(func=cmd_llm_server)
     sub.add_parser("check", help="preflight checks").set_defaults(func=not_yet("Milestone 6"))
 

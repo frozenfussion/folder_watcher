@@ -12,9 +12,14 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+import openai
 from openai import OpenAI
 
 from .config import LLMConfig, SamplingProfile
+
+
+class ModelUnavailable(Exception):
+    """The model server cannot be reached (down, restarting or still loading). Not the job's fault."""
 
 
 @dataclass
@@ -58,8 +63,15 @@ class LLMClient:
 
     def chat(self, messages: list[dict], profile: SamplingProfile,
              tools: list[dict] | None = None, max_tokens: int | None = None) -> Reply:
-        r = self._client.chat.completions.create(
-            **request_kwargs(self.llm.alias, messages, profile, tools, max_tokens))
+        try:
+            r = self._client.chat.completions.create(
+                **request_kwargs(self.llm.alias, messages, profile, tools, max_tokens))
+        except openai.APIConnectionError as e:  # includes timeouts
+            raise ModelUnavailable(f"model server unreachable: {e}") from e
+        except openai.APIStatusError as e:
+            if e.status_code == 503:  # llama-server answers 503 while the model is loading
+                raise ModelUnavailable("model server is loading the model") from e
+            raise
         choice = r.choices[0]
         calls = [ToolCall(tc.id, tc.function.name, tc.function.arguments or "{}")
                  for tc in (choice.message.tool_calls or [])]

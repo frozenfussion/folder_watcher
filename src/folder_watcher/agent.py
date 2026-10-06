@@ -13,7 +13,8 @@ from .config import PROJECT_ROOT, Config
 from .guards import DestinationGuard, GuardError, resolve_job_file
 from .prompts import AGENT_SYSTEM, AGENT_TASK
 from .tools import Registry
-from .tools.base import JobContext, JobFailed, ToolError
+from .llm_client import ModelUnavailable
+from .tools.base import JobAbandoned, JobContext, JobFailed, ToolError
 
 log = logging.getLogger("folder_watcher.agent")
 
@@ -28,7 +29,7 @@ class JobLog(logging.LoggerAdapter):
 
 @dataclass
 class JobResult:
-    status: str               # "done", "skipped" or "failed"
+    status: str               # "done", "skipped", "failed" or "abandoned"
     reason: str
     seconds: float
     steps: int
@@ -57,14 +58,17 @@ def _run_tool(registry: Registry, name: str, raw_args: str, ctx: JobContext) -> 
         return tool.handler(args, ctx), tool.terminal
     except ToolError as e:
         return {"error": str(e)}, False
-    except JobFailed:
-        raise
+    except (JobFailed, JobAbandoned, ModelUnavailable):
+        raise  # not the model's mistake: end or pause the job instead of reporting back
     except Exception as e:  # a bug in a tool must not crash the job loop
         ctx.log.exception("tool %s crashed", name)
         return {"error": f"internal error in {name}: {e}"}, False
 
 
-def run_job(path: Path, cfg: Config, registry: Registry, llm, max_steps: int | None = None) -> JobResult:
+def run_job(path: Path, cfg: Config, registry: Registry, llm, max_steps: int | None = None,
+            cancel=None) -> JobResult:
+    """Run one job. Raises ModelUnavailable if the model server is unreachable, so the
+    caller can keep the job and retry it; nothing has been written at that point."""
     job = JobLog(log, {"job": uuid.uuid4().hex[:4]})
     started = time.monotonic()
     trace = cfg.logging.trace_agent
@@ -75,6 +79,8 @@ def run_job(path: Path, cfg: Config, registry: Registry, llm, max_steps: int | N
         secs = time.monotonic() - started
         if status == "failed":
             job.error("FAILED after %.1fs: %s", secs, reason)
+        elif status == "abandoned":
+            job.warning("ABANDONED after %.1fs: %s", secs, reason)
         elif status == "skipped":
             job.info("SKIPPED in %.1fs: %s", secs, reason)
         else:
@@ -97,14 +103,16 @@ def run_job(path: Path, cfg: Config, registry: Registry, llm, max_steps: int | N
 
     ctx = JobContext(job_id=job.extra["job"], source_path=source, config=cfg, llm=llm,
                      destination=DestinationGuard(cfg.watch.destination_dir), log=job,
-                     deadline=started + cfg.agent.job_timeout_seconds)
+                     deadline=started + cfg.agent.job_timeout_seconds, cancel=cancel)
     tools = registry.schemas_for_job(source)
     messages = [{"role": "system", "content": AGENT_SYSTEM},
                 {"role": "user", "content": AGENT_TASK.format(path=shown_path)}]
 
     # --- The loop: the model picks a tool, the code runs it, the result goes back ---
     try:
+        step = 0
         for step in range(1, max_steps + 1):
+            ctx.check_cancel()
             if time.monotonic() > ctx.deadline:
                 return finish("failed", f"time limit of {cfg.agent.job_timeout_seconds:.0f}s reached", step - 1)
             reply = llm.chat(messages, cfg.llm.sampling_agent, tools=tools)
@@ -132,6 +140,11 @@ def run_job(path: Path, cfg: Config, registry: Registry, llm, max_steps: int | N
                       max_steps)
     except JobFailed as e:
         return finish("failed", str(e), step)
+    except JobAbandoned:
+        return finish("abandoned", "the service is stopping; nothing was written for this file", step)
+    except ModelUnavailable as e:
+        job.warning("model server unavailable at step %d: %s", step, e)
+        raise
     except Exception as e:  # e.g. the model server went away; the caller decides about retrying
         job.exception("unexpected error")
         return finish("failed", f"{type(e).__name__}: {e}", step)

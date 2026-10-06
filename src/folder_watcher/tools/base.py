@@ -19,6 +19,10 @@ class JobFailed(Exception):
     """Something the model cannot fix (e.g. a damaged translation). Ends the job at once."""
 
 
+class JobAbandoned(Exception):
+    """The service is shutting down; the job stops at the next safe point and writes nothing."""
+
+
 @dataclass
 class JobContext:
     """Everything a tool may use for one job. The model never sees this object."""
@@ -34,6 +38,12 @@ class JobContext:
     outcome: str | None = None        # "skipped" or "written", set by terminal tools
     reason: str = ""                  # skip reason
     output_path: Path | None = None
+    cancel: Any = None                # threading.Event set at shutdown, or None
+
+    def check_cancel(self) -> None:
+        """Called between model calls: the safe points where a job may be abandoned."""
+        if self.cancel is not None and self.cancel.is_set():
+            raise JobAbandoned("service is stopping")
 
 
 @dataclass(frozen=True)

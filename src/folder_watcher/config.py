@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -250,23 +251,24 @@ class LiveConfig:
     def __init__(self, path: Path | str = DEFAULT_CONFIG_PATH) -> None:
         self.path = Path(path)
         self._config = load_config(self.path)  # the first load must succeed
-        self._mtime = self._read_mtime()
+        self._seen = self._read()
 
-    def _read_mtime(self) -> tuple[int, int] | None:
-        # Size too, so two quick edits within one clock tick are still noticed.
+    def _read(self) -> bytes | None:
+        # Compare contents, not mtime/size: `config set` keeps the length the same, and
+        # two quick edits can share a timestamp. The file is tiny, so this is cheap.
         try:
-            st = self.path.stat()
+            return self.path.read_bytes()
         except OSError:
             return None
-        return (st.st_mtime_ns, st.st_size)
 
     def changed(self) -> bool:
-        return self._read_mtime() != self._mtime
+        return self._read() != self._seen
 
     def get(self) -> Config:
         """Return the current config, reloading first if the file changed."""
-        if self.changed():
-            self._mtime = self._read_mtime()
+        current = self._read()
+        if current != self._seen:
+            self._seen = current
             try:
                 new = load_config(self.path)
             except ConfigError as e:
@@ -276,3 +278,80 @@ class LiveConfig:
                     log.info("watching %s", "enabled" if new.watch.enabled else "disabled")
                 self._config = new
         return self._config
+
+
+# --- `config set`: change one value in place, keeping the file's comments and layout ---
+
+def _value_end(line: str, start: int) -> int:
+    """Index just past a TOML value that starts at `start` (stops before a # comment)."""
+    quote, depth, i = None, 0, start
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+        elif c == "#":
+            break
+        i += 1
+    if quote or depth > 0:
+        raise ConfigError("this value spans several lines; edit config/config.toml by hand instead")
+    return len(line[:i].rstrip())
+
+
+def _toml_literal(raw: str) -> str:
+    """Turn command-line text into a TOML value: numbers, true/false and lists as written,
+    anything else as a quoted string."""
+    if raw.strip().lower() in ("true", "false"):
+        return raw.strip().lower()
+    try:
+        tomllib.loads(f"v = {raw}")
+        return raw.strip()
+    except tomllib.TOMLDecodeError:
+        return '"' + raw.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def set_value(path: Path, dotted: str, raw: str) -> str:
+    """Set e.g. watch.enabled to false. Validates the whole file before replacing it.
+    Returns the new TOML value text. Raises ConfigError if the key or value is wrong."""
+    section, _, key = dotted.rpartition(".")
+    if not section:
+        raise ConfigError(f"give a full key such as watch.enabled, not {dotted!r}")
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    current, index = None, None
+    for i, line in enumerate(lines):
+        header = re.match(r"\s*\[([^\[\]]+)\]\s*(#.*)?$", line)
+        if header:
+            current = header.group(1).strip()
+        elif current == section and re.match(rf"\s*{re.escape(key)}\s*=", line):
+            index = i
+            break
+    if index is None:
+        raise ConfigError(f"unknown config key {dotted!r}")
+    line = lines[index]
+    after_eq = line.index("=") + 1
+    start = after_eq + len(line[after_eq:]) - len(line[after_eq:].lstrip(" \t"))
+    end = _value_end(line, start)
+    new = _toml_literal(raw)
+    rest = line[end:]
+    # Keep a trailing comment in the same column when the new value is shorter.
+    gap = len(rest) - len(rest.lstrip(" \t"))
+    if rest.strip().startswith("#"):
+        rest = " " * max(1, gap + (end - start) - len(new)) + rest.lstrip(" \t")
+    lines[index] = line[:start] + new + rest
+    text = "".join(lines)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        load_config(tmp)  # the whole file must still be valid, or nothing changes
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return new

@@ -31,11 +31,16 @@ Translate the user's text into English.
 
 - Output only the translation: no preamble, no notes, no explanations.
 - Keep the structure exactly: Markdown headings, lists, tables, emphasis, blank lines and line breaks.
+- Keep proper nouns (names of people, places, products) as they are, unless they have
+  a well-known English form.
+- If the text is already English, return it unchanged.
+"""
+
+# Added only when the chunk really contains placeholders. (When it was always present, the
+# model sometimes copied the example token into a text that had none.)
+PLACEHOLDER_RULES = """\
 - The text contains placeholder tokens such as {example}. They stand for code and links.
   Copy every placeholder exactly as written, once, in the matching position.
   Never translate, change, split, merge or remove a placeholder.
   A placeholder that is alone on its line must stay alone on its line.
-- Keep proper nouns (names of people, places, products) as they are, unless they have
-  a well-known English form.
-- If the text is already English, return it unchanged.
 """

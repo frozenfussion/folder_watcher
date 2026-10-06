@@ -206,3 +206,22 @@ def test_requests_never_turn_thinking_on():
         assert "chat_template_kwargs" not in text and "enable_thinking" not in text and "reasoning" not in text
         assert kwargs["temperature"] == profile.temperature
         assert kwargs["extra_body"] == {"top_k": profile.top_k, "min_p": profile.min_p}
+
+
+def test_placeholder_rules_only_when_needed(cfg, registry):
+    """Showing an example token to the model when there are none made it invent one."""
+    systems = []
+
+    class Recorder(FakeLLM):
+        def chat(self, messages, profile, tools=None, max_tokens=None):
+            if not tools:
+                systems.append(messages[0]["content"])
+            return super().chat(messages, profile, tools, max_tokens)
+
+    for name, text in (("plain.txt", "Bonjour le monde."), ("code.md", "Voici `make`.")):
+        path = make(cfg, name, text)
+        llm = Recorder([call("read_file", path=str(path)), call("translate_text"),
+                        call("write_translation", translation_id="t1")])
+        assert run_job(path, cfg, registry, llm).status == "done"
+    assert "⟦" not in systems[0] and "placeholder" not in systems[0]
+    assert "⟦C1⟧" in systems[1]

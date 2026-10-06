@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from ..chunking import chunk, join
-from ..prompts import TRANSLATOR_SYSTEM
+from ..prompts import PLACEHOLDER_RULES, TRANSLATOR_SYSTEM
 from ..protect import Protected, ProtectError, check_chunk, protect
 from .base import JobContext, JobFailed, Tool, ToolError
 
@@ -18,8 +18,8 @@ def _needs_model(text: str, protected: Protected) -> bool:
 
 
 def _translate_chunk(core: str, n: int, total: int, protected: Protected, hint: str, ctx: JobContext) -> str:
-    example = next(iter(protected.originals), "⟦U1⟧")
-    system = TRANSLATOR_SYSTEM.format(example=example)
+    tokens = protected.tokens_in(core)
+    system = TRANSLATOR_SYSTEM + (PLACEHOLDER_RULES.format(example=tokens[0]) if tokens else "")
     if hint:  # in the system prompt, never in the text, so it cannot end up in the output
         system += f"\nThe source language is probably {hint}.\n"
     user = core
@@ -51,6 +51,7 @@ def translate_text(args: dict, ctx: JobContext) -> dict:
     hint = str(args.get("source_language") or "").strip()
     out = []
     for n, piece in enumerate(pieces, 1):
+        ctx.check_cancel()
         if time.monotonic() > ctx.deadline:
             raise JobFailed("job time limit reached during translation")
         # Translate only the content; keep the exact surrounding whitespace so chunks rejoin cleanly.
